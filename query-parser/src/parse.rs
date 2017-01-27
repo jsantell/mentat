@@ -12,14 +12,25 @@ extern crate combine;
 extern crate edn;
 extern crate mentat_query;
 
-use self::combine::{eof, many1, parser, satisfy_map, Parser, ParseResult, Stream};
+use self::combine::{eof, many1, optional, parser, satisfy_map, token, Parser, ParseResult, Stream};
 use self::combine::combinator::{Expected, FnParser, choice, try};
 use self::edn::Value::PlainSymbol;
-use self::mentat_query::{Element, FindSpec, Variable};
+use self::mentat_query::{
+    Element,
+    FindSpec,
+    NonIntegerConstant,
+    Pattern,
+    PatternNonValuePlace,
+    PatternValuePlace,
+    SrcVar,
+    Variable,
+    WhereClause,
+};
 
 use super::error::{FindParseError, FindParseResult};
 
 pub struct Query<I>(::std::marker::PhantomData<fn(I) -> I>);
+pub struct Where<I>(::std::marker::PhantomData<fn(I) -> I>);
 pub struct Find<I>(::std::marker::PhantomData<fn(I) -> I>);
 
 // Nothing about this is specific to the type of parser.
@@ -39,18 +50,6 @@ macro_rules! satisfy_unwrap {
     }
 }
 
-impl<I> Query<I>
-    where I: Stream<Item = edn::Value>
-{
-    fn variable() -> ResultParser<Variable, I> {
-        fn_parser(Query::<I>::variable_, "variable")
-    }
-
-    fn variable_(input: I) -> ParseResult<Variable, I> {
-        satisfy_map(|x: edn::Value| super::util::value_to_variable(&x)).parse_stream(input)
-    }
-}
-
 /// Generate a `satisfy_map` expression that matches a `PlainSymbol`
 /// value with the given name.
 ///
@@ -67,6 +66,130 @@ macro_rules! matches_plain_symbol {
             }
             return None;
         }).parse_stream($input)
+    }
+}
+
+trait FromValue<T> {
+    fn from_value(edn::Value) -> Option<T>;
+}
+
+impl FromValue<PatternNonValuePlace> for PatternNonValuePlace {
+    fn from_value(v: edn::Value) -> Option<PatternNonValuePlace> {
+        match v {
+            edn::Value::Integer(x) => if x >= 0 {
+                Some(PatternNonValuePlace::Entid(x as u64))
+            } else {
+                None
+            },
+            edn::Value::PlainSymbol(x) => if x.0.as_str() == "_" {
+                Some(PatternNonValuePlace::Placeholder)
+            } else if x.is_var_symbol() {
+                Some(PatternNonValuePlace::Variable(Variable(x)))
+            } else {
+                None
+            },
+            edn::Value::NamespacedKeyword(x) =>
+                Some(PatternNonValuePlace::Ident(x)),
+            _ => None,
+        }
+    }
+}
+
+impl FromValue<PatternValuePlace> for PatternValuePlace {
+    fn from_value(v: edn::Value) -> Option<PatternValuePlace> {
+        match v {
+            edn::Value::Integer(x) => Some(PatternValuePlace::EntidOrInteger(x)),
+            edn::Value::PlainSymbol(x) => if x.0.as_str() == "_" {
+                Some(PatternValuePlace::Placeholder)
+            } else if x.is_var_symbol() {
+                Some(PatternValuePlace::Variable(Variable(x)))
+            } else {
+                None
+            },
+            edn::Value::NamespacedKeyword(x) =>
+                Some(PatternValuePlace::IdentOrKeyword(x)),
+            edn::Value::Boolean(x) => Some(PatternValuePlace::Constant(NonIntegerConstant::Boolean(x))),
+            edn::Value::Float(x) => Some(PatternValuePlace::Constant(NonIntegerConstant::Float(x))),
+            edn::Value::BigInteger(x) => Some(PatternValuePlace::Constant(NonIntegerConstant::BigInteger(x))),
+            edn::Value::Text(x) => Some(PatternValuePlace::Constant(NonIntegerConstant::Text(x))),
+            _ => None,
+        }
+    }
+}
+
+impl<I> Query<I>
+    where I: Stream<Item = edn::Value>
+{
+    fn source_var() -> ResultParser<SrcVar, I> {
+        fn_parser(Query::<I>::source_var_, "source_var")
+    }
+
+    fn source_var_(input: I) -> ParseResult<SrcVar, I> {
+        satisfy_map(SrcVar::from_value).parse_stream(input)
+    }
+
+    fn variable() -> ResultParser<Variable, I> {
+        fn_parser(Query::<I>::variable_, "variable")
+    }
+
+    fn variable_(input: I) -> ParseResult<Variable, I> {
+        satisfy_map(|x: edn::Value| super::util::value_to_variable(&x)).parse_stream(input)
+    }
+
+    fn to_parsed_value<T>(r: ParseResult<T, I>) -> Option<T> {
+        r.ok().map(|x| x.0)
+    }
+}
+
+impl<I> Where<I>
+    where I: Stream<Item = edn::Value>
+{
+    fn pattern_value_place() -> ResultParser<PatternValuePlace, I> {
+        fn_parser(Where::<I>::pattern_value_place_, "pattern_value_place")
+    }
+
+    fn pattern_value_place_(input: I) -> ParseResult<PatternValuePlace, I> {
+        satisfy_map(|x: edn::Value| PatternValuePlace::from_value(x)).parse_stream(input)
+    }
+
+    fn pattern_non_value_place() -> ResultParser<PatternNonValuePlace, I> {
+        fn_parser(Where::<I>::pattern_non_value_place_, "pattern_non_value_place")
+    }
+
+    fn pattern_non_value_place_(input: I) -> ParseResult<PatternNonValuePlace, I> {
+        satisfy_map(|x: edn::Value| PatternNonValuePlace::from_value(x)).parse_stream(input)
+    }
+
+    fn pattern() -> ResultParser<Pattern, I> {
+        fn_parser(Where::<I>::pattern_, "pattern")
+    }
+
+    fn pattern_(input: I) -> ParseResult<Pattern, I> {
+        satisfy_unwrap!(edn::Value::Vector, y, {
+            // While *technically* Datomic allows you to have a query like:
+            // [:find … :where [[?x]]]
+            // We don't -- we require at list e, a.
+            let mut p =
+            (optional(Query::source_var()),                 // src
+             Where::pattern_non_value_place(),              // e
+             Where::pattern_non_value_place(),              // a
+             optional(Where::pattern_value_place()),        // v
+             optional(Where::pattern_non_value_place()),    // tx
+             eof())
+                .map(|(src, e, a, v, tx, _)| {
+                     let v = v.unwrap_or(PatternValuePlace::Placeholder);
+                     let tx = tx.unwrap_or(PatternNonValuePlace::Placeholder);
+                     Pattern {
+                         source: src,
+                         entity: e,
+                         attribute: a,
+                         value: v,
+                         tx: tx,
+                     }
+                });
+            Query::to_parsed_value(p.parse_lazy(&y[..]).into())
+        })
+        .parse_stream(input)
     }
 }
 
@@ -108,7 +231,7 @@ impl<I> Find<I>
                 let mut p = (Query::variable(), Find::ellipsis(), eof())
                     .map(|(var, _, _)| FindSpec::FindColl(Element::Variable(var)));
                 let r: ParseResult<FindSpec, _> = p.parse_lazy(&y[..]).into();
-                Find::to_parsed_value(r)
+                Query::to_parsed_value(r)
             })
             .parse_stream(input)
     }
@@ -143,7 +266,7 @@ impl<I> Find<I>
         satisfy_unwrap!(edn::Value::Vector, y, {
                 let r: ParseResult<FindSpec, _> =
                     Find::elements().map(FindSpec::FindTuple).parse_lazy(&y[..]).into();
-                Find::to_parsed_value(r)
+                Query::to_parsed_value(r)
             })
             .parse_stream(input)
     }
@@ -162,10 +285,6 @@ impl<I> Find<I>
                      &mut try(Find::find_tuple()),
                      &mut try(Find::find_rel())])
             .parse_stream(input)
-    }
-
-    fn to_parsed_value<T>(r: ParseResult<T, I>) -> Option<T> {
-        r.ok().map(|x| x.0)
     }
 }
 
@@ -193,9 +312,20 @@ mod test {
     extern crate combine;
     extern crate edn;
     extern crate mentat_query;
+    extern crate ordered_float;
 
     use self::combine::Parser;
-    use self::mentat_query::{Element, FindSpec, Variable};
+    use self::ordered_float::OrderedFloat;
+    use self::mentat_query::{
+        Element,
+        FindSpec,
+        NonIntegerConstant,
+        Pattern,
+        PatternNonValuePlace,
+        PatternValuePlace,
+        SrcVar,
+        Variable,
+    };
 
     use super::*;
 
@@ -205,6 +335,48 @@ mod test {
             let result = par.parse(&$input[..]);
             assert_eq!(result, Ok(($expected, &[][..])));
         }}
+    }
+
+    #[test]
+    fn test_pattern_mixed() {
+        let e = edn::PlainSymbol::new("_");
+        let a = edn::NamespacedKeyword::new("foo", "bar");
+        let v = OrderedFloat(99.9);
+        let tx = edn::PlainSymbol::new("?tx");
+        let input = [edn::Value::Vector(
+            vec!(edn::Value::PlainSymbol(e.clone()),
+                 edn::Value::NamespacedKeyword(a.clone()),
+                 edn::Value::Float(v.clone()),
+                 edn::Value::PlainSymbol(tx.clone())))];
+        assert_parses_to!(Where::pattern, input, Pattern {
+            source: None,
+            entity: PatternNonValuePlace::Placeholder,
+            attribute: PatternNonValuePlace::Ident(a),
+            value: PatternValuePlace::Constant(NonIntegerConstant::Float(v)),
+            tx: PatternNonValuePlace::Variable(Variable(tx)),
+        });
+    }
+
+    #[test]
+    fn test_pattern_vars() {
+        let s = edn::PlainSymbol::new("$x");
+        let e = edn::PlainSymbol::new("?e");
+        let a = edn::PlainSymbol::new("?a");
+        let v = edn::PlainSymbol::new("?v");
+        let tx = edn::PlainSymbol::new("?tx");
+        let input = [edn::Value::Vector(
+            vec!(edn::Value::PlainSymbol(s.clone()),
+                 edn::Value::PlainSymbol(e.clone()),
+                 edn::Value::PlainSymbol(a.clone()),
+                 edn::Value::PlainSymbol(v.clone()),
+                 edn::Value::PlainSymbol(tx.clone())))];
+        assert_parses_to!(Where::pattern, input, Pattern {
+            source: Some(SrcVar::NamedSrc("x".to_string())),
+            entity: PatternNonValuePlace::Variable(Variable(e)),
+            attribute: PatternNonValuePlace::Variable(Variable(a)),
+            value: PatternValuePlace::Variable(Variable(v)),
+            tx: PatternNonValuePlace::Variable(Variable(tx)),
+        });
     }
 
     #[test]
