@@ -43,14 +43,32 @@ pub type SrcVarName = String;          // Do not include the required syntactic 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Variable(pub PlainSymbol);
 
-#[derive(Clone,Debug,Eq,PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SrcVar {
     DefaultSrc,
     NamedSrc(SrcVarName),
 }
 
+impl SrcVar {
+    pub fn from_value(val: edn::Value) -> Option<SrcVar> {
+        if let edn::Value::PlainSymbol(ref s) = val {
+            SrcVar::from_symbol(s)
+        } else {
+            None
+        }
+    }
+
+    pub fn from_symbol(sym: &PlainSymbol) -> Option<SrcVar> {
+        if sym.is_src_symbol() {
+            Some(SrcVar::NamedSrc(sym.plain_name().to_string()))
+        } else {
+            None
+        }
+    }
+}
+
 /// These are the scalar values representable in EDN.
-#[derive(Clone,Debug,Eq,PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NonIntegerConstant {
     Boolean(bool),
     BigInteger(BigInt),
@@ -72,6 +90,7 @@ pub enum FnArg {
 /// This encoding allows us to represent integers that aren't
 /// entity IDs. That'll get filtered out in the context of the
 /// database.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PatternNonValuePlace {
     Placeholder,
     Variable(Variable),
@@ -82,11 +101,12 @@ pub enum PatternNonValuePlace {
 /// The `v` part of a pattern can be much broader: it can represent
 /// integers that aren't entity IDs (particularly negative integers),
 /// strings, and all the rest. We group those under `Constant`.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PatternValuePlace {
     Placeholder,
     Variable(Variable),
     EntidOrInteger(i64),
-    Ident(NamespacedKeyword),
+    IdentOrKeyword(NamespacedKeyword),
     Constant(NonIntegerConstant),
 }
 
@@ -209,18 +229,17 @@ pub fn requires_distinct(spec: &FindSpec) -> bool {
 // A pattern with a reversed attribute — :foo/_bar — is reversed
 // at the point of parsing. These `Pattern` instances only represent
 // one direction.
-#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pattern {
-    source: Option<SrcVar>,
-    entity: PatternNonValuePlace,
-    attribute: PatternNonValuePlace,
-    value: PatternValuePlace,
-    tx: PatternNonValuePlace,
+    pub source: Option<SrcVar>,
+    pub entity: PatternNonValuePlace,
+    pub attribute: PatternNonValuePlace,
+    pub value: PatternValuePlace,
+    pub tx: PatternNonValuePlace,
 }
 
 #[allow(dead_code)]
 pub enum WhereClause {
-    /*
     Not,
     NotJoin,
     Or,
@@ -228,7 +247,6 @@ pub enum WhereClause {
     Pred,
     WhereFn,
     RuleExpr,
-    */
     Pattern,
 }
 
