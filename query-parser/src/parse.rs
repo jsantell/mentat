@@ -19,6 +19,7 @@ use self::mentat_query::{Element, FindSpec, Variable};
 
 use super::error::{FindParseError, FindParseResult};
 
+pub struct Query<I>(::std::marker::PhantomData<fn(I) -> I>);
 pub struct Find<I>(::std::marker::PhantomData<fn(I) -> I>);
 
 // Nothing about this is specific to the type of parser.
@@ -38,17 +39,21 @@ macro_rules! satisfy_unwrap {
     }
 }
 
-impl<I> Find<I>
+impl<I> Query<I>
     where I: Stream<Item = edn::Value>
 {
     fn variable() -> ResultParser<Variable, I> {
-        fn_parser(Find::<I>::variable_, "variable")
+        fn_parser(Query::<I>::variable_, "variable")
     }
 
     fn variable_(input: I) -> ParseResult<Variable, I> {
         satisfy_map(|x: edn::Value| super::util::value_to_variable(&x)).parse_stream(input)
     }
+}
 
+impl<I> Find<I>
+    where I: Stream<Item = edn::Value>
+{
     fn period() -> ResultParser<(), I> {
         fn_parser(Find::<I>::period_, "period")
     }
@@ -86,7 +91,7 @@ impl<I> Find<I>
     }
 
     fn find_scalar_(input: I) -> ParseResult<FindSpec, I> {
-        (Find::variable(), Find::period(), eof())
+        (Query::variable(), Find::period(), eof())
             .map(|(var, _, _)| FindSpec::FindScalar(Element::Variable(var)))
             .parse_stream(input)
     }
@@ -97,7 +102,7 @@ impl<I> Find<I>
 
     fn find_coll_(input: I) -> ParseResult<FindSpec, I> {
         satisfy_unwrap!(edn::Value::Vector, y, {
-                let mut p = (Find::variable(), Find::ellipsis(), eof())
+                let mut p = (Query::variable(), Find::ellipsis(), eof())
                     .map(|(var, _, _)| FindSpec::FindColl(Element::Variable(var)));
                 let r: ParseResult<FindSpec, _> = p.parse_lazy(&y[..]).into();
                 Find::to_parsed_value(r)
@@ -110,7 +115,7 @@ impl<I> Find<I>
     }
 
     fn elements_(input: I) -> ParseResult<Vec<Element>, I> {
-        (many1::<Vec<Variable>, _>(Find::variable()), eof())
+        (many1::<Vec<Variable>, _>(Query::variable()), eof())
             .map(|(vars, _)| {
                 vars.into_iter()
                     .map(Element::Variable)
@@ -203,7 +208,7 @@ mod test {
     fn test_find_sp_variable() {
         let sym = edn::PlainSymbol::new("?x");
         let input = [edn::Value::PlainSymbol(sym.clone())];
-        assert_parses_to!(Find::variable, input, Variable(sym));
+        assert_parses_to!(Query::variable, input, Variable(sym));
     }
 
     #[test]
