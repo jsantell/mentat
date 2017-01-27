@@ -51,6 +51,25 @@ impl<I> Query<I>
     }
 }
 
+/// Generate a `satisfy_map` expression that matches a `PlainSymbol`
+/// value with the given name.
+///
+/// We do this rather than using `combine::token` so that we don't
+/// need to allocate a new `String` inside a `PlainSymbol` inside a `Value`
+/// just to match input.
+macro_rules! matches_plain_symbol {
+    ($name: expr, $input: ident) => {
+        satisfy_map(|x: edn::Value| {
+            if let PlainSymbol(ref s) = x {
+                if s.0.as_str() == $name {
+                    return Some(());
+                }
+            }
+            return None;
+        }).parse_stream($input)
+    }
+}
+
 impl<I> Find<I>
     where I: Stream<Item = edn::Value>
 {
@@ -59,15 +78,7 @@ impl<I> Find<I>
     }
 
     fn period_(input: I) -> ParseResult<(), I> {
-        satisfy_map(|x: edn::Value| {
-                if let PlainSymbol(ref s) = x {
-                    if s.0.as_str() == "." {
-                        return Some(());
-                    }
-                }
-                return None;
-            })
-            .parse_stream(input)
+        matches_plain_symbol!(".", input)
     }
 
     fn ellipsis() -> ResultParser<(), I> {
@@ -75,15 +86,7 @@ impl<I> Find<I>
     }
 
     fn ellipsis_(input: I) -> ParseResult<(), I> {
-        satisfy_map(|x: edn::Value| {
-                if let PlainSymbol(ref s) = x {
-                    if s.0.as_str() == "..." {
-                        return Some(());
-                    }
-                }
-                return None;
-            })
-            .parse_stream(input)
+        matches_plain_symbol!("...", input)
     }
 
     fn find_scalar() -> ResultParser<FindSpec, I> {
